@@ -3,6 +3,7 @@
 #include <ESP8266WebServer.h>
 #include "WiFiManager.h"          //https://github.com/tzapu/WiFiManager
 #include <PubSubClient.h>
+#include <FS.h>
 
 /* TOPICS:
  *  Message to a mobile device:
@@ -43,6 +44,9 @@ bool currentPower;
 #define ON  '1'
 #define OFF '0'
 
+#define FILE_SERVER "/server.txt"
+#define FILE_CLIENT "/client.txt"
+
 // Instanciar WI-FI and MQTT
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -79,6 +83,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     Serial.println("MQTT inconsistent message");
     return;
   }
+  Serial.println("Executing instruction...");
 
   // Executar a instrução da mensagem
   String topicAll = mqttTopicClientId+"/"+mqttTopicAll;
@@ -88,8 +93,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     funcPower(payload[0] == ON ? true : false);
   } else {
     // Get status
-    bool powerCheck = powerStatus();
-    String powerMsg = powerCheck ? "1" : "0";
+    String powerMsg = powerStatus() ? "1" : "0";
     
     Serial.println("Get power's status: " + powerMsg);
     String topic = mqttTopicBase +"/out";
@@ -131,9 +135,7 @@ void mqttReconnect() {
 
 // Função do módulo / Alterar ENERGIA
 void funcPower(bool cmd) {
-  bool checkStatus = powerStatus();
-
-  if(cmd != checkStatus)
+  if(cmd != powerStatus())
     digitalWrite(RELAY_PORT, !digitalRead(RELAY_PORT));
 }
 
@@ -164,19 +166,45 @@ void checkPowerStatus() {
 void setup() {
   // Comunicação Serial
   Serial.begin(115200);
+  Serial.println("\nStarting...");
 
   // Iniciar portas
   pinMode(RELAY_PORT, OUTPUT);
   pinMode(SENSOR_PORT, INPUT);
   digitalWrite(RELAY_PORT, LOW);
 
-  // Para pegar parâmetros/configurações na página save vindos por GET do aplicativo
-  WiFiManagerParameter toGetServerMqtt("m", "", "", 50);
-  WiFiManagerParameter toGetClientId("c", "", "", 11);
+  // Memória: ler configurações prévias para MQTT
+  Serial.println("Reading memory to previous configuration...");
+  SPIFFS.begin();
+  File fServer;
+  File fClient;
+  if(!SPIFFS.exists(FILE_SERVER)) {
+    fServer = SPIFFS.open(FILE_SERVER, "w+");
+    fServer.print('\n');
+    fServer.close();
+  }
+  if(!SPIFFS.exists(FILE_CLIENT)) {
+    fClient = SPIFFS.open(FILE_CLIENT, "w+");
+    fClient.print('\n');
+    fClient.close();
+  }
+  fServer = SPIFFS.open(FILE_SERVER, "r+");
+  fClient = SPIFFS.open(FILE_CLIENT, "r+");
+  mqttServer        = fServer.readStringUntil('\n');
+  mqttTopicClientId = fClient.readStringUntil('\n');
+  fServer.close();
+  fClient.close();
+
+  Serial.println("Previous MQTT Server Address: " + mqttServer);
+  Serial.println("Previous MQTT Client ID: " + mqttTopicClientId);
+  
+  // Receber configurações para MQTT por GET
+  WiFiManagerParameter toGetServerMqtt("m", "", mqttServer.c_str(), 51);
+  WiFiManagerParameter toGetClientId("c", "", mqttTopicClientId.c_str(), 12);
   
   // WiFiManager
   WiFiManager wifiManager;
-  wifiManager.resetSettings();
+  // wifiManager.resetSettings();
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setMinimumSignalQuality(10);
@@ -191,7 +219,7 @@ void setup() {
     Serial.println("WifiManager failed to connect and hit timeout");
     ESP.reset();
     delay(1000);
-  } 
+  }
 
   // Conectado a rede WI-FI
   Serial.println("Connected WIFI");
@@ -199,12 +227,21 @@ void setup() {
   // Configurar definições MQTT
   mqttServer = toGetServerMqtt.getValue();
   mqttTopicClientId = toGetClientId.getValue();
-  Serial.println("MQTT Server: " + mqttServer);
-  Serial.println("MQTT Client ID: " + mqttTopicClientId);
+  Serial.println("Current MQTT Server Address: " + mqttServer);
+  Serial.println("Current MQTT Topic Client ID: " + mqttTopicClientId);
   
   mqtt.setServer(mqttServer.c_str(), MQTT_PORT);
   mqtt.setCallback(mqttCallback);
   mqttTopicBase = mqttTopicClientId +"/"+ mqttTopicToken;
+
+  // Memória: salvar configurações para MQTT
+  fServer = SPIFFS.open(FILE_SERVER, "r+");
+  fClient = SPIFFS.open(FILE_CLIENT, "r+");
+  fServer.print(mqttServer);
+  fClient.print(mqttTopicClientId);
+  fServer.close();
+  fClient.close();
+  SPIFFS.end();
 
   // Atualizar o status inicial da ENERGIA
   currentPower = powerStatus();
