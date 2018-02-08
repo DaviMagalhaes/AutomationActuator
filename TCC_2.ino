@@ -103,11 +103,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 // Reconectar ao servidor MQTT
 void mqttReconnect() {
+  // Criar um ID para cliente baseado no endereço MAC
+  String clientId = WiFi.softAPmacAddress();
+    
   while(!mqtt.connected()) {
     Serial.print("Attempting MQTT connection... ");
-    
-    // Criar um ID para cliente baseado no endereço MAC
-    String clientId = WiFi.softAPmacAddress();
     
     // Tentativa de conexão
     if (mqtt.connect(clientId.c_str())) {
@@ -204,7 +204,7 @@ void setup() {
   
   // WiFiManager
   WiFiManager wifiManager;
-  // wifiManager.resetSettings();
+  wifiManager.resetSettings();
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setMinimumSignalQuality(10);
