@@ -6,14 +6,9 @@
 #include <FS.h>
 
 /* TOPICS:
- *  Message to a mobile device:
- *      <clientId>/<token module>/<in OR out>
- *      token: MAC address;
- *         in:   subscribe;
- *        out:   publish;
- *
- *  Message to sync all:
- *      <clientId>/ALL
+ *  Message input:  <MAC_address>/in
+ *  Message output: <MAC_address>/out
+ *  
  * QOS:
  *   1
  */
@@ -23,14 +18,13 @@
 // WI-FI configurações do ponto de acesso
 #define SSID_THIS "HomeAutomation"
 #define PW_THIS   "12345678"
-#define MINIMUM_SIGNAL 10
+#define MINIMUM_SIGNAL 30
 
 // MQTT configurações
-#define MQTT_PORT            1883
-String mqttTopicToken      = WiFi.softAPmacAddress();
-String mqttTopicAll        = "ALL";
-String mqttTopicBase;
-String mqttTopicClientId;
+#define MQTT_PORT       1883
+#define MQTT_IN         "/in"
+#define MQTT_OUT        "/out"
+String mqttMacAddress = WiFi.softAPmacAddress();
 String mqttServer;
 
 // Portas
@@ -41,15 +35,19 @@ String mqttServer;
 bool currentPower;
 
 // Chaves para referências
-#define ON  '1'
-#define OFF '0'
+#define ON   '1'
+#define OFF  '0'
+#define SYNC 's'
+#define TYPE_LIGHT 'l'
+#define TYPE_PLUG 'p'
 
 #define FILE_SERVER "/server.txt"
-#define FILE_CLIENT "/client.txt"
+#define FILE_TYPE   "/type.txt"
 
-// Instanciar WI-FI and MQTT
+// Instancias Globais
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+String moduleType;
 
 // ###################################################################### WIFIMANAGER
 
@@ -73,9 +71,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("MQTT message received [");
   Serial.print(topic);
   Serial.print("]: ");
-  for(int i=0; i<length; i++) {
+  for(int i=0; i<length; i++)
     Serial.print((char) payload[i]);
-  }
   Serial.println();
 
   // Verificar mensagem
@@ -83,21 +80,35 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     Serial.println("MQTT inconsistent message");
     return;
   }
-  Serial.println("Executing instruction...");
 
   // Executar a instrução da mensagem
-  String topicAll = mqttTopicClientId+"/"+mqttTopicAll;
-  if(strcmp(topic, topicAll.c_str()) != 0) {
-    // Função ligar/desligar
-    Serial.println("Function status: " + payload[0]);
-    funcPower(payload[0] == ON ? true : false);
-  } else {
-    // Get status
-    String powerMsg = powerStatus() ? "1" : "0";
-    
-    Serial.println("Get power's status: " + powerMsg);
-    String topic = mqttTopicBase +"/out";
-    mqtt.publish(topic.c_str(), powerMsg.c_str());
+  switch(payload[0]) {
+    case ON:
+    case OFF:
+      // Função ligar/desligar
+      Serial.print("Energy status instruction: ");
+      Serial.println((char) payload[0]);
+      funcPower(payload[0] == ON ? true : false);
+      break;
+      
+    case SYNC: {
+      // Enviar estado atual para sincronia
+      String powerMsg = powerStatus() ? "1" : "0";
+      Serial.print("Get power's status: ");
+      Serial.println(powerMsg);
+      
+      String topic = mqttMacAddress + MQTT_OUT;
+      mqtt.publish(topic.c_str(), powerMsg.c_str());
+      
+      Serial.print("MQTT publish [");
+      Serial.print(topic);
+      Serial.print("]: ");
+      Serial.println(powerMsg);
+    } break;
+      
+    default:
+      Serial.println("Unknown instruction");
+      break;
   }
 }
 
@@ -113,15 +124,11 @@ void mqttReconnect() {
     if (mqtt.connect(clientId.c_str())) {
       Serial.println("MQTT connected");
 
-      // Se inscreve no tópico para ESTE MÓDULO
-      String topic = mqttTopicBase +"/in";
+      // Se inscreve no tópico para receber mensagens
+      String topic = mqttMacAddress + MQTT_IN;
       mqtt.subscribe(topic.c_str());
-      Serial.println("MQTT subscribe topic: " + topic);
-
-      // Se inscreve no tópico para TODOS OS MÓDULO DO USUÁRIO
-      topic = mqttTopicClientId +"/"+ mqttTopicAll;
-      mqtt.subscribe(topic.c_str());
-      Serial.println("MQTT subscribe topic: " + topic);
+      Serial.print("MQTT subscribe topic: ");
+      Serial.println(topic);
     } else {
       Serial.print("MQTT failed, rc=");
       Serial.print(mqtt.state());
@@ -142,7 +149,19 @@ void funcPower(bool cmd) {
 // Pegar status da ENERGIA
 bool powerStatus() {
   // DAVI: https://www.youtube.com/watch?v=GBySmlfuKmg
-  return false;
+
+  switch(moduleType[0]) {
+    case TYPE_LIGHT:
+      // Iluminação
+      pinMode(D2, INPUT);
+      return digitalRead(D2);
+    case TYPE_PLUG:
+      // Tomada
+      return !digitalRead(RELAY_PORT);
+    default:
+      Serial.println("Unknown module type. Power status false.");
+      return false;
+  }
 }
 
 // Verificar mudança de ENERGIA
@@ -153,10 +172,15 @@ void checkPowerStatus() {
     currentPower = checkStatus;
     
     String message = currentPower ? "1" : "0";
-    String topic = mqttTopicBase +"/out";
+    String topic = mqttMacAddress + MQTT_OUT;
     mqtt.publish(topic.c_str(), message.c_str());
 
-    Serial.println("Update the energy status: " + message);
+    Serial.print("Update the energy status: ");
+    Serial.println(message);
+    Serial.print("MQTT publish [");
+    Serial.print(topic);
+    Serial.print("]: ");
+    Serial.println(message);
   }
 }
 
@@ -173,34 +197,36 @@ void setup() {
   pinMode(SENSOR_PORT, INPUT);
   digitalWrite(RELAY_PORT, LOW);
 
-  // Memória: ler configurações prévias para MQTT
+  // Memória: endereço prévio do servidor MQTT e do tipo do módulo
   Serial.println("Reading memory to previous configuration...");
   SPIFFS.begin();
   File fServer;
-  File fClient;
+  File fType;
   if(!SPIFFS.exists(FILE_SERVER)) {
     fServer = SPIFFS.open(FILE_SERVER, "w+");
     fServer.print('\n');
     fServer.close();
   }
-  if(!SPIFFS.exists(FILE_CLIENT)) {
-    fClient = SPIFFS.open(FILE_CLIENT, "w+");
-    fClient.print('\n');
-    fClient.close();
+  if(!SPIFFS.exists(FILE_TYPE)) {
+    fType = SPIFFS.open(FILE_TYPE, "w+");
+    fType.print('\n');
+    fType.close();
   }
   fServer = SPIFFS.open(FILE_SERVER, "r+");
-  fClient = SPIFFS.open(FILE_CLIENT, "r+");
-  mqttServer        = fServer.readStringUntil('\n');
-  mqttTopicClientId = fClient.readStringUntil('\n');
+  fType = SPIFFS.open(FILE_TYPE, "r+");
+  mqttServer = fServer.readStringUntil('\n');
+  moduleType = fType.readStringUntil('\n');
   fServer.close();
-  fClient.close();
+  fType.close();
 
-  Serial.println("Previous MQTT Server Address: " + mqttServer);
-  Serial.println("Previous MQTT Client ID: " + mqttTopicClientId);
+  Serial.print("Previous MQTT server address: ");
+  Serial.println(mqttServer.length() != 0 ? mqttServer : "empty");
+  Serial.print("Previous module type: ");
+  Serial.println(moduleType.length() != 0 ? moduleType : "empty");
   
-  // Receber configurações para MQTT por GET
+  // Receber configurações por GET
   WiFiManagerParameter toGetServerMqtt("m", "", mqttServer.c_str(), 51);
-  WiFiManagerParameter toGetClientId("c", "", mqttTopicClientId.c_str(), 12);
+  WiFiManagerParameter toGetModuleType("t", "", moduleType.c_str(), 2);
   
   // WiFiManager
   WiFiManager wifiManager;
@@ -208,8 +234,8 @@ void setup() {
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setMinimumSignalQuality(10);
-  wifiManager.addParameter(&toGetClientId);
   wifiManager.addParameter(&toGetServerMqtt);
+  wifiManager.addParameter(&toGetModuleType);
 
   // Definir endereço IP para ponto de acesso: 10.0.1.1
   wifiManager.setAPStaticIPConfig(IPAddress(10,0,1,1), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
@@ -224,23 +250,24 @@ void setup() {
   // Conectado a rede WI-FI
   Serial.println("Connected WIFI");
 
-  // Configurar definições MQTT
+  // Configurar definições
   mqttServer = toGetServerMqtt.getValue();
-  mqttTopicClientId = toGetClientId.getValue();
-  Serial.println("Current MQTT Server Address: " + mqttServer);
-  Serial.println("Current MQTT Topic Client ID: " + mqttTopicClientId);
+  moduleType = toGetModuleType.getValue();
+  Serial.print("Current MQTT server address: ");
+  Serial.println(mqttServer);
+  Serial.print("Current type module: ");
+  Serial.println(moduleType);
   
   mqtt.setServer(mqttServer.c_str(), MQTT_PORT);
   mqtt.setCallback(mqttCallback);
-  mqttTopicBase = mqttTopicClientId +"/"+ mqttTopicToken;
 
-  // Memória: salvar configurações para MQTT
+  // Memória: salvar configurações
   fServer = SPIFFS.open(FILE_SERVER, "r+");
-  fClient = SPIFFS.open(FILE_CLIENT, "r+");
-  fServer.print(mqttServer);
-  fClient.print(mqttTopicClientId);
+  fType = SPIFFS.open(FILE_TYPE, "r+");
+  fServer.print(mqttServer +'\n');
+  fType.print(moduleType +'\n');
   fServer.close();
-  fClient.close();
+  fType.close();
   SPIFFS.end();
 
   // Atualizar o status inicial da ENERGIA
