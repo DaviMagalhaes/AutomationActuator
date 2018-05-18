@@ -148,13 +148,11 @@ void funcPower(bool cmd) {
 
 // Pegar status da ENERGIA
 bool powerStatus() {
-  // DAVI: https://www.youtube.com/watch?v=GBySmlfuKmg
-
   switch(moduleType[0]) {
     case TYPE_LIGHT:
       // Iluminação
-      pinMode(D2, INPUT);
-      return digitalRead(D2);
+      pinMode(SENSOR_PORT, INPUT);
+      return digitalRead(SENSOR_PORT);
     case TYPE_PLUG:
       // Tomada
       return !digitalRead(RELAY_PORT);
